@@ -1,4 +1,5 @@
 use std::str;
+use log::trace;
 
 use crate::ansi::{
     color::{
@@ -13,7 +14,7 @@ use crate::ansi::{
     },
 };
 use super::{
-    Terminal,
+    Handler,
     CursorStyle,
     ClipboardType,
     ClearLineMode,
@@ -39,10 +40,10 @@ impl Processor {
     pub fn advance(
         &mut self,
         bytes: &[u8],
-        terminal: &mut dyn Terminal,
+        handler: &mut dyn Handler,
         writer: &mut dyn std::io::Write,
     ) {
-        let mut performer = Performer::new(terminal, writer, &mut self.state);
+        let mut performer = Performer::new(handler, writer, &mut self.state);
         for byte in bytes {
             self.parser.advance(&mut performer, *byte);
         }
@@ -60,19 +61,19 @@ impl Default for ProcessorState {
 }
 
 pub struct Performer<'a> {
-    terminal: &'a mut dyn Terminal,
+    handler: &'a mut dyn Handler,
     writer: &'a mut dyn std::io::Write,
     state: &'a mut ProcessorState,
 }
 
 impl<'a> Performer<'a> {
     pub fn new(
-        terminal: &'a mut dyn Terminal,
+        handler: &'a mut dyn Handler,
         writer: &'a mut dyn std::io::Write,
         state: &'a mut ProcessorState,
     ) -> Self {
         Self {
-            terminal,
+            handler,
             writer,
             state,
         }
@@ -81,19 +82,21 @@ impl<'a> Performer<'a> {
 
 impl<'a> ::vte::Perform for Performer<'a> {
     fn print(&mut self, ch: char) {
-        self.terminal.put_char(ch);
+        trace!("[processor] print: char={:?}", ch);
+        self.handler.put_char(ch);
         self.state.preceding_char = Some(ch);
     }
 
     fn execute(&mut self, byte: u8) {
+        trace!("[processor] execute: byte={:?}", byte);
         match byte {
-            C0::BEL => self.terminal.bell(),
-            C0::BS => self.terminal.put_backspace(1),
-            C0::HT => self.terminal.put_tab(1),
-            C0::LF | C0::VT | C0::FF => self.terminal.put_lf(),
-            C0::CR => self.terminal.put_cr(),
-            C0::SI => self.terminal.set_active_charset(CharsetIndex::G0),
-            C0::SO => self.terminal.set_active_charset(CharsetIndex::G1),
+            C0::BEL => self.handler.bell(),
+            C0::BS => self.handler.put_backspace(1),
+            C0::HT => self.handler.put_tab(1),
+            C0::LF | C0::VT | C0::FF => self.handler.put_lf(),
+            C0::CR => self.handler.put_cr(),
+            C0::SI => self.handler.set_active_charset(CharsetIndex::G0),
+            C0::SO => self.handler.set_active_charset(CharsetIndex::G1),
             _ => {
                 // TODO unhandled
             }
@@ -101,26 +104,27 @@ impl<'a> ::vte::Perform for Performer<'a> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        trace!("[processor] esc_dispatch: intermediates={:?}, ignore={:?}, byte={:?}", intermediates, _ignore, byte);
         match (byte, intermediates.get(0)) {
-            (b'0', Some(b'(')) => self.terminal.configure_charset(CharsetIndex::G0, StandardCharset::Ascii),
-            (b'0', Some(b')')) => self.terminal.configure_charset(CharsetIndex::G1, StandardCharset::Ascii),
-            (b'7', None) => self.terminal.save_cursor_position(),
-            (b'8', None) => self.terminal.restore_cursor_position(),
-            (b'8', Some(b'#')) => self.terminal.do_alignment_test(),
-            (b'=', None) => self.terminal.set_keypad_application_mode(),
-            (b'>', None) => self.terminal.unset_keypad_application_mode(),
-            (b'B', Some(b'(')) => self.terminal.configure_charset(CharsetIndex::G0, StandardCharset::Special),
-            (b'B', Some(b')')) => self.terminal.configure_charset(CharsetIndex::G1, StandardCharset::Special),
-            (b'D', None) => self.terminal.put_lf(),
+            (b'0', Some(b'(')) => self.handler.configure_charset(CharsetIndex::G0, StandardCharset::Ascii),
+            (b'0', Some(b')')) => self.handler.configure_charset(CharsetIndex::G1, StandardCharset::Ascii),
+            (b'7', None) => self.handler.save_cursor_position(),
+            (b'8', None) => self.handler.restore_cursor_position(),
+            (b'8', Some(b'#')) => self.handler.do_alignment_test(),
+            (b'=', None) => self.handler.set_keypad_application_mode(),
+            (b'>', None) => self.handler.unset_keypad_application_mode(),
+            (b'B', Some(b'(')) => self.handler.configure_charset(CharsetIndex::G0, StandardCharset::Special),
+            (b'B', Some(b')')) => self.handler.configure_charset(CharsetIndex::G1, StandardCharset::Special),
+            (b'D', None) => self.handler.put_lf(),
             (b'E', None) => {
-                self.terminal.put_lf();
-                self.terminal.put_cr();
+                self.handler.put_lf();
+                self.handler.put_cr();
             },
-            (b'H', None) => self.terminal.set_horizontal_tabstop(
-                self.terminal.cursor().x,
+            (b'H', None) => self.handler.set_horizontal_tabstop(
+                self.handler.cursor().x,
             ),
-            (b'M', None) => self.terminal.reverse_index(),
-            (b'c', None) => self.terminal.reset_state(),
+            (b'M', None) => self.handler.reverse_index(),
+            (b'c', None) => self.handler.reset_state(),
             (b'\\', None) => {},
             _ => {
                 // TODO implement unhandled.
@@ -129,6 +133,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        trace!("[processor] osc_dispatch: params={:?}, bell_terminated={:?}", params, bell_terminated);
         macro_rules! unhandled {
             () => {{
                 // TODO
@@ -140,7 +145,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
             return;
         }
 
-        let terminal = &mut self.terminal;
+        let handler = &mut self.handler;
         let writer = &mut self.writer;
         let terminator = if bell_terminated { '\x07' } else { '\x1b' };
         let num = match str::from_utf8(params[0]).ok()
@@ -162,7 +167,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
                         .flat_map(|b| str::from_utf8(b))
                         .collect::<Vec<&str>>()
                         .join(";");
-                    terminal.set_title(title.trim());
+                    handler.set_title(title.trim());
                 } else {
                     unhandled!();
                 }
@@ -181,7 +186,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
                     .and_then(|s| s.parse().ok());
 
                 if let (Some(index), Some(color)) = (index, color) {
-                    terminal.set_color(index, color);
+                    handler.set_color(index, color);
                 }
             },
 
@@ -199,7 +204,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
                     .collect::<Vec<&str>>()
                     .join(";");
 
-                terminal.set_path(path.trim());
+                handler.set_path(path.trim());
             },
 
             // Set/get foreground/background/cursor color
@@ -224,8 +229,8 @@ impl<'a> ::vte::Perform for Performer<'a> {
 
                     match *param {
                         b"?" => {
-                            if let Some(ref color) = terminal.get_special_color(index) {
-                                write!(
+                            if let Some(ref color) = handler.get_special_color(index) {
+                                let _ = write!(
                                     writer,
                                     "\x1b]{};rgb:{1:02x}{1:02x}/{2:02x}{2:02x}/{3:02x}{3:02x}{4}",
                                     i,
@@ -240,7 +245,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
                             let color: Option<RgbColor> = str::from_utf8(s)
                                 .ok().and_then(|s| s.parse().ok());
                             if let Some(color) = color {
-                                terminal.set_special_color(index, color);
+                                handler.set_special_color(index, color);
                             } else {
                                 unhandled!();
                                 return;
@@ -266,7 +271,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
                         }
                     };
                     if let Some(style) = CursorStyle::from_primitive(style) {
-                        terminal.set_cursor_style(style);
+                        handler.set_cursor_style(style);
                     } else {
                         unhandled!();
                     }
@@ -293,14 +298,20 @@ impl<'a> ::vte::Perform for Performer<'a> {
 
                 match params[2] {
                     b"?" => {
-                        if let Some(ref data) = terminal.get_clipboard(clipboard_type) {
+                        if let Some(ref data) = handler.get_clipboard(clipboard_type) {
                             let data = base64::encode(data);
-                            write!(writer, "\x1b]52;{};{}{}", clipboard_char, data, terminator);
+                            let _ = write!(
+                                writer,
+                                "\x1b]52;{};{}{}",
+                                clipboard_char,
+                                data,
+                                terminator,
+                            );
                         }
                     },
                     data => {
                         if let Ok(data) = base64::decode(data) {
-                            terminal.set_clipboard(clipboard_type, data.as_ref());
+                            handler.set_clipboard(clipboard_type, data.as_ref());
                         } else {
                             unhandled!();
                         }
@@ -312,29 +323,30 @@ impl<'a> ::vte::Perform for Performer<'a> {
             104 => {
                 if params.len() == 1 {
                     for index in 0..=255 {
-                        terminal.reset_color(index);
+                        handler.reset_color(index);
                     }
-                }
-                let index: Option<u8> = str::from_utf8(params[1]).ok()
-                    .and_then(|s| s.parse().ok());
-                if let Some(index) = index {
-                    terminal.reset_color(index);
+                } else {
+                    let index: Option<u8> = str::from_utf8(params[1]).ok()
+                        .and_then(|s| s.parse().ok());
+                    if let Some(index) = index {
+                        handler.reset_color(index);
+                    }
                 }
             },
 
             // Reset foreground color
             110 => {
-                terminal.reset_special_color(SpecialColor::Foreground);
+                handler.reset_special_color(SpecialColor::Foreground);
             },
 
             // Reset background color
             111 => {
-                terminal.reset_special_color(SpecialColor::Background);
+                handler.reset_special_color(SpecialColor::Background);
             },
 
             // Reset cursor color
             112 => {
-                terminal.reset_special_color(SpecialColor::Cursor);
+                handler.reset_special_color(SpecialColor::Cursor);
             },
 
             _ => unhandled!(),
@@ -345,9 +357,16 @@ impl<'a> ::vte::Perform for Performer<'a> {
         &mut self,
         args: &[i64],
         intermediates: &[u8],
-        has_ignored_intermediates: bool,
+        ignore_intermediates: bool,
         action: char,
     ) {
+        trace!(
+            "[processor] csi_dispatch: args={:?}, intermediates={:?}, ignore_intermediates={:?}, action={:?}",
+            args,
+            intermediates,
+            ignore_intermediates,
+            action,
+        );
         macro_rules! unhandled {
             () => {{
                 // TODO
@@ -362,59 +381,59 @@ impl<'a> ::vte::Perform for Performer<'a> {
             }
         }
 
-        if has_ignored_intermediates || intermediates.len() > 1 {
+        if ignore_intermediates || intermediates.len() > 1 {
             return;
         }
 
-        let terminal = &mut self.terminal;
+        let handler = &mut self.handler;
         let writer = &mut self.writer;
 
         match (action, intermediates.get(0)) {
             // Insert blank lines
             ('@', None) => {
-                terminal.insert_blank(get_arg!(idx: 0, def: 1) as usize);
+                handler.insert_blank(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Move the cursor up
             ('A', None) => {
-                terminal.move_up(get_arg!(idx: 0, def: 1) as usize);
+                handler.move_up(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Move the cursor down
             ('B', None) | ('e', None) => {
-                terminal.move_down(get_arg!(idx: 0, def: 1) as usize);
+                handler.move_down(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Move the cursor forward
             ('C', None) | ('a', None) => {
-                terminal.move_forward(get_arg!(idx: 0, def: 1) as usize);
+                handler.move_forward(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Move the cursor backwards
             ('D', None) => {
-                terminal.move_backward(get_arg!(idx: 0, def: 1) as usize);
+                handler.move_backward(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Move the cursor down and put a carriage return.
             ('E', None) => {
-                terminal.move_down(get_arg!(idx: 0, def: 1) as usize);
-                terminal.put_cr();
+                handler.move_down(get_arg!(idx: 0, def: 1) as usize);
+                handler.put_cr();
             },
 
             // Move the cursor up and put a carriage return.
             ('F', None) => {
-                terminal.move_up(get_arg!(idx: 0, def: 1) as usize);
-                terminal.put_cr();
+                handler.move_up(get_arg!(idx: 0, def: 1) as usize);
+                handler.put_cr();
             },
 
             // Go to column
             ('G', None) | ('`', None) => {
-                terminal.goto_column(get_arg!(idx: 0, def: 1) as usize - 1);
+                handler.goto_column(get_arg!(idx: 0, def: 1) as usize - 1);
             },
 
             // Set cursor position
             ('H', None) | ('f', None) => {
-                terminal.goto(
+                handler.goto(
                     get_arg!(idx: 0, def: 1) as usize - 1, // X
                     get_arg!(idx: 1, def: 1) as usize - 1, // Y
                 );
@@ -432,7 +451,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
                         return;
                     }
                 };
-                terminal.clear_screen(mode);
+                handler.clear_screen(mode);
             },
 
             // Clear line
@@ -446,49 +465,49 @@ impl<'a> ::vte::Perform for Performer<'a> {
                         return;
                     }
                 };
-                terminal.clear_line(mode);
+                handler.clear_line(mode);
             },
 
             // Insert blank lines
             ('L', None) => {
-                terminal.insert_blank_lines(get_arg!(idx: 0, def: 1) as usize);
+                handler.insert_blank_lines(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Delete lines
             ('M', None) => {
-                terminal.delete_lines(get_arg!(idx: 0, def: 1) as usize);
+                handler.delete_lines(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Delete chars
             ('P', None) => {
-                terminal.delete_chars(get_arg!(idx: 0, def: 1) as usize);
+                handler.delete_chars(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Scroll up
             ('S', None) => {
-                terminal.scroll_up(get_arg!(idx: 0, def: 1) as usize);
+                handler.scroll_up(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Scroll down
             ('T', None) => {
-                terminal.scroll_down(get_arg!(idx: 0, def: 1) as usize);
+                handler.scroll_down(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Erase characters
             ('X', None) => {
-                terminal.erase_chars(get_arg!(idx: 0, def: 1) as usize);
+                handler.erase_chars(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Move backward tab stops
             ('Z', None) => {
-                terminal.move_backward_tabs(get_arg!(idx: 0, def: 1) as usize);
+                handler.move_backward_tabs(get_arg!(idx: 0, def: 1) as usize);
             },
 
             // Repeat last char
             ('b', None) => {
                 if let Some(ch) = self.state.preceding_char {
                     for _ in 0..get_arg!(idx: 0, def: 1) {
-                        terminal.put_char(ch);
+                        handler.put_char(ch);
                     }
                 }
             },
@@ -497,7 +516,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
             ('c', None) => {
                 match get_arg!(idx: 0, def: 0) {
                     0 => {
-                        write!(writer, "\x1b[?1;2c");
+                        let _ = write!(writer, "\x1b[?1;2c");
                     },
                     _ => unhandled!(),
                 }
@@ -507,7 +526,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
             ('c', Some(b'>')) => {
                 match get_arg!(idx: 0, def: 0) {
                     0 => {
-                        write!(writer, "\x1b[>84;0;0c");
+                        let _ = write!(writer, "\x1b[>84;0;0c");
                     },
                     _ => unhandled!(),
                 }
@@ -515,18 +534,18 @@ impl<'a> ::vte::Perform for Performer<'a> {
 
             // Go to line
             ('d', None) => {
-                terminal.goto_line(get_arg!(idx: 0, def: 1) as usize - 1);
+                handler.goto_line(get_arg!(idx: 0, def: 1) as usize - 1);
             },
 
             // Clear tabstops
             ('g', None) => {
                 match get_arg!(idx: 0, def: 0) {
                     0 => {
-                        terminal.unset_horizontal_tabstop(
-                            terminal.cursor().x,
+                        handler.unset_horizontal_tabstop(
+                            handler.cursor().x,
                         );
                     }
-                    3 => terminal.unset_all_horizontal_tabstops(),
+                    3 => handler.unset_all_horizontal_tabstops(),
                     _ => {
                         unhandled!();
                         return;
@@ -538,7 +557,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
             ('h', intermediate) => {
                 for arg in args {
                     match TerminalMode::from_primitive(intermediate, *arg) {
-                        Some(mode) => terminal.set_mode(mode),
+                        Some(mode) => handler.set_mode(mode),
                         None => unhandled!(),
                     }
                 }
@@ -548,7 +567,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
             ('l', intermediate) => {
                 for arg in args {
                     match TerminalMode::from_primitive(intermediate, *arg) {
-                        Some(mode) => terminal.unset_mode(mode),
+                        Some(mode) => handler.unset_mode(mode),
                         None => unhandled!(),
                     }
                 }
@@ -557,10 +576,10 @@ impl<'a> ::vte::Perform for Performer<'a> {
             // Set SGR attribute
             ('m', None) => {
                 if args.is_empty() {
-                    terminal.sgr_attribute(sgr::Attribute::Reset);
+                    handler.sgr_attribute(sgr::Attribute::Reset);
                 } else {
                     for attr in sgr::parse_attributes(&mut args.iter()) {
-                        terminal.sgr_attribute(attr);
+                        handler.sgr_attribute(attr);
                     }
                 }
             },
@@ -586,12 +605,12 @@ impl<'a> ::vte::Perform for Performer<'a> {
                 match get_arg!(idx: 0, def: 0) {
                     5 => {
                         // respond with b"\x1b[0n"
-                        write!(writer, "\x1b[0n");
+                        let _ = write!(writer, "\x1b[0n");
                     },
                     6 => {
                         // respond with format!("\x1b[{};{}R", cursor_line, cursor_col)
-                        let cur = terminal.cursor();
-                        write!(writer, "\x1b[{};{}R", cur.y, cur.x);
+                        let cur = handler.cursor();
+                        let _ = write!(writer, "\x1b[{};{}R", cur.y, cur.x);
                     },
                     _ => unhandled!(),
                 }
@@ -609,7 +628,7 @@ impl<'a> ::vte::Perform for Performer<'a> {
             // Set cursor style
             ('q', Some(b' ')) => {
                 match CursorStyle::from_primitive(get_arg!(idx: 0, def: 0)) {
-                    Some(style) => terminal.set_cursor_style(style),
+                    Some(style) => handler.set_cursor_style(style),
                     None => unhandled!(),
                 }
             },
@@ -627,27 +646,27 @@ impl<'a> ::vte::Perform for Performer<'a> {
             // Set scrolling region
             ('r', None) => {
                 let top = get_arg!(idx: 0, def: 1) as usize;
-                let bottom = get_arg!(idx: 1, def: terminal.size().y as i64) as usize;
-                terminal.set_scrolling_region(top, bottom);
+                let bottom = get_arg!(idx: 1, def: handler.size().y as i64) as usize;
+                handler.set_scrolling_region(top, bottom);
             },
 
             // Save cursor position
             ('s', None) => {
-                terminal.save_cursor_position();
+                handler.save_cursor_position();
             },
 
             // Save/restore title
             ('t', None) => {
                 match get_arg!(idx: 0, def: 0) {
-                    22 => terminal.save_title(),
-                    23 => terminal.restore_title(),
+                    22 => handler.save_title(),
+                    23 => handler.restore_title(),
                     _ => unhandled!(),
                 }
             },
 
             // Restore cursor position
             ('u', None) => {
-                terminal.restore_cursor_position();
+                handler.restore_cursor_position();
             },
 
             _ => unhandled!(),

@@ -1,199 +1,133 @@
-mod processor;
-mod terminal;
+mod futures;
+mod task;
 
-pub use terminal::Terminal;
-pub use processor::Processor;
+use {
+    std::{
+        io,
+        sync::{
+            atomic::{
+                AtomicBool,
+                Ordering,
+            },
+            Mutex,
+        },
+    },
+    anyhow::{
+        Context as _,
+        Result,
+    },
+    log::trace,
+    tokio::process::{
+        Child,
+        Command,
+    },
+    crate::{
+        pty::{
+            Pty,
+            PtyReader,
+            PtyWriter,
+            WithPty,
+            split,
+        },
+        screen::Screen,
+        util::Point,
+    },
+    self::futures as fut,
+};
 
-pub struct Cursor {
-    pub line: usize,
-    pub column: usize,
+pub use task::terminal_task;
+
+pub struct Terminal {
+    // SAFETY: Pty operations are thread safe and so accessing them
+    // from an immutable reference is safe.
+    pub process: Mutex<Child>,
+    pub pty_reader: Mutex<PtyReader>,
+    pub pty_writer: Mutex<PtyWriter>,
+    pub screen: Mutex<Screen>,
+    pub running: AtomicBool,
+    pub dirty: AtomicBool,
 }
 
-pub struct Size {
-    pub lines: usize,
-    pub columns: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CursorStyle {
-    Default,
-    BlinkingBlock,
-    StaticBlock,
-    BlinkingUnderline,
-    StaticUnderline,
-    BlinkingBar,
-    StaticBar,
-}
-
-impl Default for CursorStyle {
-    fn default() -> Self {
-        Self::Default
+impl Terminal {
+    pub fn spawn(mut command: Command, size: Point) -> Result<Self> {
+        let mut pty = Pty::open().context("open pty")?;
+        pty.set_size(size).context("pty set size")?;
+        let process = command
+            .with_pty(&pty).context("process add pty")?
+            .spawn().context("spawn process")?;
+        let (pty_reader, pty_writer) = split(pty);
+        trace!("process spawned: {:?}", process);
+        Ok(Self {
+            process: Mutex::new(process),
+            pty_reader: Mutex::new(pty_reader),
+            pty_writer: Mutex::new(pty_writer),
+            screen: Mutex::new(Screen::new(size)),
+            running: AtomicBool::new(true),
+            dirty: AtomicBool::new(true),
+        })
     }
-}
 
-impl CursorStyle {
-    pub fn from_primitive(number: i64) -> Option<Self> {
-        match number {
-            0 => Some(Self::Default),
-            1 => Some(Self::BlinkingBlock),
-            2 => Some(Self::StaticBlock),
-            3 => Some(Self::BlinkingUnderline),
-            4 => Some(Self::StaticUnderline),
-            5 => Some(Self::BlinkingBar),
-            6 => Some(Self::StaticBar),
-            _ => None,
+    pub fn alive(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn kill(&self) -> io::Result<()> {
+        let mut process = self.process.lock().unwrap();
+        self.running.store(false, Ordering::SeqCst);
+        process.kill()
+    }
+
+    pub fn wait<'a>(&'a self) -> fut::Wait<'a> {
+        fut::Wait {
+            terminal: self,
         }
     }
 
-    pub fn to_primitive(&self) -> i64 {
-        match self {
-            Self::Default => 0,
-            Self::BlinkingBlock => 1,
-            Self::StaticBlock => 2,
-            Self::BlinkingUnderline => 3,
-            Self::StaticUnderline => 4,
-            Self::BlinkingBar => 5,
-            Self::StaticBar => 6,
+    pub fn pty_read<'a>(&'a self, buf: &'a mut [u8]) -> fut::Read<'a> {
+        fut::Read {
+            terminal: self,
+            buf,
         }
     }
 
-    pub fn to_blinking(&self) -> Self {
-        match self {
-            Self::StaticBlock => Self::BlinkingBlock,
-            Self::StaticUnderline => Self::BlinkingUnderline,
-            Self::StaticBar => Self::BlinkingBar,
-            style => *style,
+    pub fn pty_write<'a>(&'a self, buf: &'a [u8]) -> fut::Write<'a> {
+        fut::Write {
+            terminal: self,
+            buf,
         }
     }
 
-    pub fn to_static(&self) -> Self {
-        match self {
-            Self::BlinkingBlock => Self::StaticBlock,
-            Self::BlinkingUnderline => Self::StaticUnderline,
-            Self::BlinkingBar => Self::StaticBar,
-            style => *style,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClipboardType {
-    Clipboard,
-    Primary,
-    Selection,
-    Cut0,
-    Cut1,
-    Cut2,
-    Cut3,
-    Cut4,
-    Cut5,
-    Cut6,
-    Cut7,
-}
-
-impl Default for ClipboardType {
-    fn default() -> Self {
-        Self::Clipboard
-    }
-}
-
-impl ClipboardType {
-    pub fn from_primitive(byte: u8) -> Option<Self> {
-        match byte {
-            b'c' => Some(ClipboardType::Clipboard),
-            b'p' => Some(ClipboardType::Primary),
-            b's' => Some(ClipboardType::Selection),
-            b'0' => Some(ClipboardType::Cut0),
-            b'1' => Some(ClipboardType::Cut1),
-            b'2' => Some(ClipboardType::Cut2),
-            b'3' => Some(ClipboardType::Cut3),
-            b'4' => Some(ClipboardType::Cut4),
-            b'5' => Some(ClipboardType::Cut5),
-            b'6' => Some(ClipboardType::Cut6),
-            b'7' => Some(ClipboardType::Cut7),
-            _ => None,
+    pub fn pty_flush<'a>(&'a self) -> fut::Flush<'a> {
+        fut::Flush {
+            terminal: self,
         }
     }
 
-    pub fn to_primitive(&self) -> u8 {
-        match self {
-            ClipboardType::Clipboard => b'c',
-            ClipboardType::Primary => b'p',
-            ClipboardType::Selection => b's',
-            ClipboardType::Cut0 => b'0',
-            ClipboardType::Cut1 => b'1',
-            ClipboardType::Cut2 => b'2',
-            ClipboardType::Cut3 => b'3',
-            ClipboardType::Cut4 => b'4',
-            ClipboardType::Cut5 => b'5',
-            ClipboardType::Cut6 => b'6',
-            ClipboardType::Cut7 => b'7',
+    pub fn pty_shutdown<'a>(&'a self) -> fut::Shutdown<'a> {
+        fut::Shutdown {
+            terminal: self,
         }
     }
-}
 
-pub enum TerminalMode {
-    CursorKeys,
-    ColumnMode,
-    Insert,
-    Origin,
-    LineWrap,
-    BlinkingCursor,
-    LineFeedNewLine,
-    ShowCursor,
-    ReportMouseClicks,
-    ReportCellMouseMotion,
-    ReportAllMouseMotion,
-    ReportFocusInOut,
-    Utf8Mouse,
-    SgrMouse,
-    AlternateScroll,
-    SwapScreenAndSetRestoreCursor,
-    BracketedPaste,
-}
-
-impl TerminalMode {
-    pub fn from_primitive(intermediate: Option<&u8>, number: i64) -> Option<Self> {
-        let private = match intermediate {
-            Some(b'?') => true,
-            None => false,
-            _ => return None,
-        };
-
-        match (number, private) {
-            (1, true) => Some(Self::CursorKeys),
-            (3, true) => Some(Self::ColumnMode),
-            (6, true) => Some(Self::Origin),
-            (7, true) => Some(Self::LineWrap),
-            (12, true) => Some(Self::BlinkingCursor),
-            (25, true) => Some(Self::ShowCursor),
-            (1000, true) => Some(Self::ReportMouseClicks),
-            (1002, true) => Some(Self::ReportCellMouseMotion),
-            (1003, true) => Some(Self::ReportAllMouseMotion),
-            (1004, true) => Some(Self::ReportFocusInOut),
-            (1005, true) => Some(Self::Utf8Mouse),
-            (1006, true) => Some(Self::SgrMouse),
-            (1007, true) => Some(Self::AlternateScroll),
-            (1049, true) => Some(Self::SwapScreenAndSetRestoreCursor),
-            (2004, true) => Some(Self::BracketedPaste),
-
-            (4, false) => Some(Self::Insert),
-            (20, false) => Some(Self::LineFeedNewLine),
-
-            _ => None,
-        }
-    }
-}
-
-pub enum ClearScreenMode {
-    Below,
-    Above,
-    All,
-    Saved,
-}
-
-pub enum ClearLineMode {
-    Right,
-    Left,
-    All,
+    // pub async fn pty_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        // let mut pty_reader = self.pty_reader.lock().await;
+        // pty_reader.read(buf).await
+    // }
+//
+    // pub async fn pty_write(&self, buf: &[u8]) -> io::Result<usize> {
+        // let mut pty_writer = self.pty_writer.lock().await;
+        // let n = pty_writer.write(buf).await?;
+        // pty_writer.flush().await?;
+        // Ok(n)
+    // }
+//
+    // pub async fn pty_flush(&self) -> io::Result<()> {
+        // let mut pty_writer = self.pty_writer.lock().await;
+        // pty_writer.flush().await
+    // }
+//
+    // pub async fn pty_shutdown(&self) -> io::Result<()> {
+        // let mut pty_writer = self.pty_writer.lock().await;
+        // pty_writer.shutdown().await
+    // }
 }

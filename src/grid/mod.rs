@@ -1,12 +1,16 @@
-mod line;
-mod cell;
-mod iter;
+pub mod line;
+pub mod cell;
+pub mod iter;
 
 use std::ops::RangeBounds;
 use crate::util::Point;
-use self::{
+pub use self::{
     line::Line,
-    cell::Cell,
+    cell::{
+        Cell,
+        Attributes,
+        Flags,
+    },
     iter::{
         GridIterator,
         GridMutIterator,
@@ -19,7 +23,7 @@ use self::{
 pub struct Grid {
     data: Vec<Line>,
     tabstops: Vec<bool>,
-    size: Point,
+    pub size: Point,
 }
 
 impl Grid {

@@ -19,7 +19,7 @@ use super::{
 };
 
 /// Trait representing the actions that a terminal can receive.
-pub trait Terminal {
+pub trait Handler {
     /// Get the terminal size.
     fn size(&self) -> &Point;
 
@@ -192,4 +192,3 @@ pub trait Terminal {
     /// Reset the terminal state.
     fn reset_state(&mut self);
 }
-

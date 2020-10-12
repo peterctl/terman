@@ -1,9 +1,7 @@
 use std::fmt;
 use std::str;
 
-use serde::{Serialize, Deserialize};
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Color {
     Indexed(u8),
     Rgb(RgbColor),
@@ -100,7 +98,7 @@ impl fmt::Display for Color {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct RgbColor {
     pub r: u8,
     pub g: u8,
@@ -154,7 +152,7 @@ impl fmt::Display for RgbColor {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum SpecialColor {
     Foreground,
     Background,
