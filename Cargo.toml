@@ -1,0 +1,14 @@
+[package]
+name = "terman"
+version = "0.1.0"
+authors = ["petercp"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+base64 = "0.12.3"
+bitflags = "1"
+flagset = "0.3.0"
+serde = { version = "1", features = ["derive"] }
+vte = "0.8.0"
