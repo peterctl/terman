@@ -6,11 +6,7 @@ use std::ops::RangeBounds;
 use crate::util::Point;
 pub use self::{
     line::Line,
-    cell::{
-        Cell,
-        Attributes,
-        Flags,
-    },
+    cell::Cell,
     iter::{
         GridIterator,
         GridMutIterator,

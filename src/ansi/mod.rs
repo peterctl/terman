@@ -1,16 +1,30 @@
+pub mod attributes;
 pub mod charset;
 pub mod color;
 pub mod handler;
 pub mod processor;
+pub mod renderer;
 pub mod sgr;
 
-pub use charset::{
-    CharsetList,
-    CharsetIndex,
-    StandardCharset,
+pub use {
+    attributes::{
+        Attributes,
+        Flags,
+    },
+    charset::{
+        CharsetList,
+        CharsetIndex,
+        StandardCharset,
+    },
+    color::{
+        Color,
+        RgbColor,
+        SpecialColor,
+    },
+    handler::Handler,
+    processor::Processor,
+    renderer::Renderer,
 };
-pub use handler::Handler;
-pub use processor::Processor;
 
 
 /// C0 set of 7-bit control characters (from ANSI X3.4-1977).

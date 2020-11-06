@@ -5,6 +5,8 @@ use {
     log::trace,
     crate::{
         ansi::{
+            Attributes,
+            Flags,
             CharsetList,
             CharsetIndex,
             StandardCharset,
@@ -23,8 +25,6 @@ use {
         grid::{
             Grid,
             Cell,
-            Attributes,
-            Flags,
         },
         util::Point,
     }

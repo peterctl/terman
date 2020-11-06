@@ -12,9 +12,13 @@ use {
     },
     log::trace,
     crate::{
-        ansi::Handler,
+        ansi::{
+            self,
+            Handler,
+        },
         term::Terminal,
         util::Point,
+        grid::Cell,
     },
 };
 
@@ -61,6 +65,7 @@ impl<W: io::Write> ScreenRenderer<W> {
     fn render_screen(&mut self) -> io::Result<()> {
         trace!("rendering screen");
         let screen = self.terminal.screen.lock().unwrap();
+        let mut prev_attrs = None;
         let size = screen.size();
         writeln!(self.writer, "\x1b[2J\x1b[3J\x1b[{};{}H", self.start.y, self.start.x)?;
         write!(self.writer, "+")?;
@@ -71,8 +76,13 @@ impl<W: io::Write> ScreenRenderer<W> {
         for y in 0..size.y {
             write!(self.writer, "\x1b[{}G|", self.start.x)?;
             for x in 0..size.x {
-                write!(self.writer, "{}", match screen.cell(Point::new(x, y)).unwrap().ch {
-                    Some(ch) => ch,
+                let ref cell = screen.cell(Point::new(x, y)).unwrap();
+                if Some(&cell.attributes) != prev_attrs {
+                    ansi::Renderer(&mut self.writer).render_attributes(&cell.attributes)?;
+                }
+                prev_attrs = Some(&cell.attributes);
+                write!(self.writer, "{}", match cell.ch {
+                    Some(c) => c,
                     None => ' ',
                 })?;
             }
