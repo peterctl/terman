@@ -1,61 +1,25 @@
 pub mod split;
 
 use {
+    crate::util::Point,
+    anyhow::{Context as _, Result},
+    mio::{event::Source, unix::SourceFd, Poll as MioPoll, Ready, Token},
     std::{
         fs::File,
-        io::{
-            self,
-            Read,
-            Write,
-        },
-        os::unix::io::{
-            AsRawFd,
-            FromRawFd,
-            RawFd,
-        },
+        io::{self, Read, Write},
+        os::unix::io::{AsRawFd, FromRawFd, RawFd},
         pin::Pin,
         process::Stdio,
-        task::{
-            Context,
-            Poll,
-        },
+        task::{Context, Poll},
     },
-    anyhow::{
-        Context as _,
-        Result,
-    },
-    mio::{
-        Evented,
-        Poll as MioPoll,
-        PollOpt,
-        Ready,
-        Token,
-        unix::{
-            EventedFd,
-            UnixReady,
-        },
-    },
+    termios::{tcsetattr, Termios, TCSANOW},
     tokio::{
-        io::{
-            AsyncRead,
-            AsyncWrite,
-            PollEvented,
-        },
+        io::{AsyncRead, AsyncWrite},
         process::Command,
     },
-    termios::{
-        TCSANOW,
-        Termios,
-        tcsetattr,
-    },
-    crate::util::Point,
 };
 
-pub use split::{
-    split,
-    PtyReader,
-    PtyWriter,
-};
+pub use split::{split, PtyReader, PtyWriter};
 
 #[inline]
 fn wrap_io_err(error: bool) -> io::Result<()> {
@@ -67,24 +31,12 @@ fn wrap_io_err(error: bool) -> io::Result<()> {
 }
 
 pub struct PtyFile {
-    file: File,
+    fd: RawFd,
 }
 
-impl Evented for PtyFile {
-    fn register(
-        &self,
-        poll: &MioPoll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()>
-    {
-        EventedFd(&self.file.as_raw_fd()).register(
-            poll,
-            token,
-            interest | UnixReady::hup(),
-            opts,
-        )
+impl Source for PtyFile {
+    fn register(&self, poll: &MioPoll, token: Token, interest: Ready) -> io::Result<()> {
+        SourceFd(&self.file.as_raw_fd()).register(poll, token, interest | UnixReady::hup(), opts)
     }
 
     fn reregister(
@@ -93,14 +45,8 @@ impl Evented for PtyFile {
         token: Token,
         interest: Ready,
         opts: PollOpt,
-    ) -> io::Result<()>
-    {
-        EventedFd(&self.file.as_raw_fd()).reregister(
-            poll,
-            token,
-            interest | UnixReady::hup(),
-            opts,
-        )
+    ) -> io::Result<()> {
+        EventedFd(&self.file.as_raw_fd()).reregister(poll, token, interest | UnixReady::hup(), opts)
     }
 
     fn deregister(&self, poll: &MioPoll) -> io::Result<()> {
@@ -132,12 +78,14 @@ impl AsRawFd for PtyFile {
 
 impl FromRawFd for PtyFile {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        Self { file: File::from_raw_fd(fd) }
+        Self {
+            file: File::from_raw_fd(fd),
+        }
     }
 }
 
 pub struct Pty {
-    inner: PollEvented<PtyFile>,
+    inner: SourceFd,
 }
 
 impl Pty {
@@ -146,15 +94,14 @@ impl Pty {
             Err(io::Error::from_raw_os_error(libc::ENOTTY))
         } else {
             Ok(Self {
-                inner: PollEvented::new(
-                    unsafe { PtyFile::from_raw_fd(file.as_raw_fd()) }
-                )?
+                inner: SourceFd::from(file.as_raw_fd()),
+                // inner: PollEvented::new(unsafe { PtyFile::from_raw_fd(file.as_raw_fd()) })?,
             })
         }
     }
 
     pub fn open() -> Result<Self> {
-        let master = unsafe {
+        let master_fd = unsafe {
             const NONBLOCK_AFTER_OPEN: bool = cfg!(target_os = "freebsd");
 
             let flags = if NONBLOCK_AFTER_OPEN {
@@ -171,16 +118,14 @@ impl Pty {
             if NONBLOCK_AFTER_OPEN {
                 let flags = libc::fcntl(master_fd, libc::F_GETFL, 0);
                 wrap_io_err(flags < 0)?;
-                wrap_io_err(
-                    libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
-                )?;
+                wrap_io_err(libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0)?;
             }
 
-            PtyFile::from_raw_fd(master_fd)
+            master_fd
         };
 
         Ok(Self {
-            inner: PollEvented::new(master).context("create PollEvented")?
+            inner: SourceFd::try_from(master_fd),
         })
     }
 
@@ -189,9 +134,8 @@ impl Pty {
             let mut buf = [0 as libc::c_char; 512];
             #[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
             {
-                wrap_io_err(
-                    libc::ptsname_r(self.as_raw_fd(), buf.as_mut_ptr(), buf.len()) != 0
-                ).context("get pty name")?;
+                wrap_io_err(libc::ptsname_r(self.as_raw_fd(), buf.as_mut_ptr(), buf.len()) != 0)
+                    .context("get pty name")?;
             }
             #[cfg(any(target_os = "macos", target_os = "freebsd"))]
             {
@@ -214,11 +158,8 @@ impl Pty {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        wrap_io_err(
-            unsafe {
-                libc::ioctl(self.as_raw_fd(), libc::TIOCSWINSZ, &winsize) == -1
-            }
-        ).context("set pty size")?;
+        wrap_io_err(unsafe { libc::ioctl(self.as_raw_fd(), libc::TIOCSWINSZ, &winsize) == -1 })
+            .context("set pty size")?;
         Ok(())
     }
 
@@ -230,11 +171,8 @@ impl Pty {
             ws_ypixel: 0,
         };
 
-        wrap_io_err(
-            unsafe {
-                libc::ioctl(self.as_raw_fd(), libc::TIOCGWINSZ, &mut winsize) == -1
-            }
-        ).context("get pty size")?;
+        wrap_io_err(unsafe { libc::ioctl(self.as_raw_fd(), libc::TIOCGWINSZ, &mut winsize) == -1 })
+            .context("get pty size")?;
         Ok(Point::new(winsize.ws_col as usize, winsize.ws_row as usize))
     }
 
@@ -248,36 +186,33 @@ impl Pty {
 }
 
 impl AsyncRead for Pty {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        AsyncRead::poll_read(
-            Pin::new(&mut self.inner),
-            cx,
-            buf,
-        )
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        AsyncRead::poll_read(Pin::new(&mut self.inner), cx, buf)
     }
 }
 
 impl AsyncWrite for Pty {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        AsyncWrite::poll_write(
-            Pin::new(&mut self.inner),
-            cx,
-            buf,
-        )
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        AsyncWrite::poll_write(Pin::new(&mut self.inner), cx, buf)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        AsyncWrite::poll_flush(
-            Pin::new(&mut self.inner),
-            cx,
-        )
+        AsyncWrite::poll_flush(Pin::new(&mut self.inner), cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        AsyncWrite::poll_shutdown(
-            Pin::new(&mut self.inner),
-            cx,
-        )
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        AsyncWrite::poll_shutdown(Pin::new(&mut self.inner), cx)
     }
 }
 
@@ -300,8 +235,7 @@ impl WithPty for Command {
         let master_fd = master.as_raw_fd();
         let slave_fd = master.open_slave().context("pty open slave")?;
         unsafe {
-            self
-                .stdin(Stdio::from_raw_fd(slave_fd))
+            self.stdin(Stdio::from_raw_fd(slave_fd))
                 .stdout(Stdio::from_raw_fd(slave_fd))
                 .stderr(Stdio::from_raw_fd(slave_fd));
 

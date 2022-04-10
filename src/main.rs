@@ -11,44 +11,33 @@ extern crate vte;
 
 mod ansi;
 mod grid;
-#[macro_use] mod macros;
+#[macro_use]
+mod macros;
 mod pty;
 mod screen;
 mod term;
 mod util;
 
 use {
-    std::{
-        io,
-        sync::Arc,
-        os::unix::io::{
-            RawFd,
-            AsRawFd,
-        },
-        time::Duration,
-    },
-    anyhow::{
-        Context,
-        Result,
-    },
-    log::trace,
-    tokio::{
-        io::{
-            self as aio,
-            AsyncReadExt,
-        },
-        process::Command,
-        runtime::Builder as RuntimeBuilder,
-        task,
-    },
-    termios::*,
     crate::{
         pty::Pty,
         screen::renderer::renderer,
-        term::{
-            Terminal,
-            terminal_task,
-        },
+        term::{terminal_task, Terminal},
+    },
+    anyhow::{Context, Result},
+    log::trace,
+    std::{
+        io,
+        os::unix::io::{AsRawFd, RawFd},
+        sync::Arc,
+        time::Duration,
+    },
+    termios::*,
+    tokio::{
+        io::{self as aio, AsyncReadExt},
+        process::Command,
+        runtime::Builder as RuntimeBuilder,
+        task,
     },
 };
 
@@ -100,11 +89,7 @@ async fn async_main() -> Result<()> {
     let terminal = Terminal::spawn(command, slave_size).context("create terminal")?;
     let terminal = Arc::new(terminal);
     trace!("starting loop");
-    let (mut renderer, notifier) = renderer(
-        Arc::clone(&terminal),
-        io::stdout(),
-        start_point,
-    );
+    let (mut renderer, notifier) = renderer(Arc::clone(&terminal), io::stdout(), start_point);
     let render_screen = {
         let terminal = Arc::clone(&terminal);
         task::spawn(async move {
@@ -130,11 +115,11 @@ async fn async_main() -> Result<()> {
                 terminal.pty_flush().await?;
                 trace!("wrote terminal pty");
                 match res {
-                    Ok(_) => {},
+                    Ok(_) => (),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => return Ok(()),
                     Err(e) => return Err(e).context("pty write"),
                 }
-            };
+            }
             trace!("stdin read task finished");
             Ok(())
         })
@@ -146,17 +131,20 @@ async fn async_main() -> Result<()> {
     tcsetattr(aio::stdin().as_raw_fd(), TCSANOW, &old_tios)?;
     print!("\x1b[2J\x1b[3J\x1b[H"); // Clear screen
     println!("process exit: {}", exit_status?);
-    println!("there are {} references to terminal", Arc::strong_count(&terminal));
+    println!(
+        "there are {} references to terminal",
+        Arc::strong_count(&terminal)
+    );
     Ok(())
 }
 
 fn main() -> Result<()> {
-    let mut runtime = RuntimeBuilder::new()
-        .threaded_scheduler()
-        .max_threads(4)
-        .core_threads(2)
+    let mut runtime = RuntimeBuilder::new_multi_thread()
+        // .max_threads(4)
+        // .core_threads(2)
         .enable_all()
-        .build().context("create tokio runtime")?;
+        .build()
+        .context("create tokio runtime")?;
 
     runtime.block_on(async_main())?;
     runtime.shutdown_timeout(Duration::from_secs(0));
